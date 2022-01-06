@@ -3,6 +3,7 @@ const aws = require('aws-sdk');
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const retry = require('async-retry');
 
 // The max time that a GitHub action is allowed to run is 6 hours.
 // That seems like a reasonable default to use if no role duration is defined.
@@ -13,6 +14,8 @@ const MAX_TAG_VALUE_LENGTH = 256;
 const SANITIZATION_CHARACTER = '_';
 const ROLE_SESSION_NAME = 'GitHubActions';
 const REGION_REGEX = /^[a-z0-9-]+$/g;
+const ROLE_TO_ASSUME_RETRIES = 5
+const ROLE_TO_ASSUME_RETRIES_FACTOR = 2
 
 async function assumeRole(params) {
   // Assume a role to get short-lived credentials using longer-lived credentials.
@@ -236,6 +239,10 @@ function getStsClient(region) {
   });
 }
 
+function isRetryableError(error) {
+  return error instanceof Error && ['IDPCommunicationErrorException', 'InvalidIdentityToken'].includes(error.code);
+}
+
 async function run() {
   try {
     // Get inputs
@@ -245,6 +252,8 @@ async function run() {
     const sessionToken = core.getInput('aws-session-token', { required: false });
     const maskAccountId = core.getInput('mask-aws-account-id', { required: false });
     const roleToAssume = core.getInput('role-to-assume', {required: false});
+    const roleToAssumeRetries = core.getInput('role-to-assume-retries', {required: false}) || ROLE_TO_ASSUME_RETRIES;
+    const roleToAssumeRetriesFactor = core.getInput('role-to-assume-retries-factor', {required: false}) || ROLE_TO_ASSUME_RETRIES_FACTOR;
     const roleExternalId = core.getInput('role-external-id', { required: false });
     let roleDurationSeconds = core.getInput('role-duration-seconds', {required: false}) || MAX_ACTION_RUNTIME;
     const roleSessionName = core.getInput('role-session-name', { required: false }) || ROLE_SESSION_NAME;
@@ -303,17 +312,48 @@ async function run() {
 
     // Get role credentials if configured to do so
     if (roleToAssume) {
-      const roleCredentials = await assumeRole({
-        sourceAccountId,
-        region,
-        roleToAssume,
-        roleExternalId,
-        roleDurationSeconds,
-        roleSessionName,
-        roleSkipSessionTagging,
-        webIdentityTokenFile,
-        webIdentityToken
-      });
+      let roleCredentials = await retry(
+        async (bail) => {
+          core.info('Assuming role')
+          let credentials;
+          try {
+            credentials = await assumeRole({
+              sourceAccountId,
+              region,
+              roleToAssume,
+              roleExternalId,
+              roleDurationSeconds,
+              roleSessionName,
+              roleSkipSessionTagging,
+              webIdentityTokenFile,
+              webIdentityToken
+            });
+          } catch(e) {
+            if (!isRetryableError(e)) {
+              bail(new Error(e));
+              return
+            }
+
+            throw new Error(e);
+          }
+
+          core.info('Successfully assumed role');
+          return credentials;
+        },
+        {
+          retries: roleToAssumeRetries,
+          factor: roleToAssumeRetriesFactor,
+          randomize: true,
+          onRetry: function (err) {
+            core.warning(`Retrying. ${err.message}`);
+          }
+        }
+      );
+
+      if (!roleCredentials) {
+        throw new Error('Unable to retrieve credentials');
+      }
+
       exportCredentials(roleCredentials);
       // We need to validate the credentials in 2 of our use-cases
       // First: self-hosted runners. If the GITHUB_ACTIONS environment variable
