@@ -240,7 +240,7 @@ function getStsClient(region) {
 }
 
 function isRetryableError(error) {
-  return error instanceof Error && ['IDPCommunicationErrorException', 'InvalidIdentityToken', 'ThrottlingException', 'ServiceUnavailable', 'ValidationError'].includes(error.code);
+  return error instanceof Error && ['IDPCommunicationErrorException', 'InvalidIdentityToken', 'ThrottlingException', 'ServiceUnavailable', 'InternalFailure'].includes(error.code);
 }
 
 async function run() {
